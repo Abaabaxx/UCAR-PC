@@ -1,0 +1,2 @@
+ucar_rviz:usb_cam
+-DCATKIN_DEVEL_PREFIX=/home/lby/ucar_ws/devel -DCMAKE_INSTALL_PREFIX=/home/lby/ucar_ws/install -G Unix Makefiles
