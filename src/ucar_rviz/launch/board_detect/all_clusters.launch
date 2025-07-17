@@ -5,5 +5,5 @@
   3.长度过滤的聚类
   4.长度过滤 + ROI区域过滤 的聚类
 -->
-  <node name="rviz" pkg="rviz" type="rviz" output="screen" args="-d $(find ucar_rviz)/rviz/radar_processor_v2.rviz" />
+  <node name="rviz" pkg="rviz" type="rviz" output="screen" args="-d $(find ucar_rviz)/rviz/all_clusters.rviz" />
 </launch>

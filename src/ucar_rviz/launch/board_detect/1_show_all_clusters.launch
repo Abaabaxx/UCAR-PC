@@ -2,5 +2,5 @@
 <!-- 可视化：
   1.原始聚类
 -->
-  <node name="rviz" pkg="rviz" type="rviz" output="screen" args="-d $(find ucar_rviz)/rviz/show_all_clusters.rviz" />
+  <node name="rviz" pkg="rviz" type="rviz" output="screen" args="-d $(find ucar_rviz)/rviz/1_show_all_clusters.rviz" />
 </launch>
