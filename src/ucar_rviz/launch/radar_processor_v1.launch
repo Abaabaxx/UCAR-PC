@@ -1,4 +1,0 @@
-<launch>
-  <!-- 自动加载 navigation 导航的 Rviz 配置文件-->
-  <node name="rviz" pkg="rviz" type="rviz" output="screen" args="-d $(find ucar_rviz)/rviz/radar_processor_v1.rviz" />
-</launch>

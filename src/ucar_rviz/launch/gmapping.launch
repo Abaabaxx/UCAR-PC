@@ -1,4 +1,0 @@
-<launch>
-  <!-- 自动加载 gmapping 的 RViz 配置文件 -->
-  <node name="rviz" pkg="rviz" type="rviz" output="screen" args="-d $(find ucar_rviz)/rviz/gmapping_4-25.rviz" />
-</launch>
