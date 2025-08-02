@@ -40,9 +40,9 @@ if __name__ == "__main__":
     dessert_board_folders = ["dessert1_board", "dessert2_board", "dessert3_board"]
     # 模型名称和路径配置
     model_configs = [
-        {"name_prefix": "fruit_board_", "path": f"/home/wy/.gazebo/models/{random.choice(fruit_board_folders)}/model.sdf"},
-        {"name_prefix": "vage_board_", "path": f"/home/wy/.gazebo/models/{random.choice(vege_board_folders)}/model.sdf"},
-        {"name_prefix": "dessert_board_", "path": f"/home/wy/.gazebo/models/{random.choice(dessert_board_folders)}/model.sdf"}
+        {"name_prefix": "fruit_board_", "path": f"/home/lby/.gazebo/models/{random.choice(fruit_board_folders)}/model.sdf"},
+        {"name_prefix": "vage_board_", "path": f"/home/lby/.gazebo/models/{random.choice(vege_board_folders)}/model.sdf"},
+        {"name_prefix": "dessert_board_", "path": f"/home/lby/.gazebo/models/{random.choice(dessert_board_folders)}/model.sdf"}
     ]
 
     # 加载所有模型
