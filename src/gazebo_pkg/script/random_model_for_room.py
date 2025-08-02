@@ -35,6 +35,7 @@ def delete_model(model_name):
  
 if __name__ == "__main__":
     rospy.init_node('spawn_random_models_node')
+    random.seed(time.time())
     fruit_board_folders = ["fruit1_board", "fruit2_board", "fruit3_board"]
     vege_board_folders = ["vage1_board", "vage2_board", "vage3_board"]
     dessert_board_folders = ["dessert1_board", "dessert2_board", "dessert3_board"]
