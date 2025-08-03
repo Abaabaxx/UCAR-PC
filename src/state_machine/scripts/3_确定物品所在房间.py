@@ -37,6 +37,7 @@ LOOK_RIGHT_DURATION = 1.0  # 向右看的时间（秒）
 PRIMARY_CONFIDENCE_THRESHOLD = 0.9  # 第一阶段（左右看）的置信度阈值
 SECONDARY_CONFIDENCE_THRESHOLD = 0.7  # 第二阶段（重试）的置信度阈值
 RETRY_DETECTION_DURATION = 2.0  # 重试检测的持续时间（秒）
+PRELIMINARY_DETECTION_DURATION = 0.2  # 初步静态检测的持续时间（秒，可调节）
 
 class RobotState(object):
     IDLE = 0
@@ -214,22 +215,22 @@ class RobotStateMachine(object):
         elif self.current_state == RobotState.DETECT_AT_C1:
             rospy.loginfo("9-开始在C1点检测物体...")
             self.is_retry_attempt = False  # 重置重试标记
-            self.start_detection_phase()
+            self.start_preliminary_detection()
             
         elif self.current_state == RobotState.DETECT_AT_C2:
             rospy.loginfo("10-开始在C2点检测物体...")
             self.is_retry_attempt = False  # 重置重试标记
-            self.start_detection_phase()
+            self.start_preliminary_detection()
             
         elif self.current_state == RobotState.DETECT_AT_B1:
             rospy.loginfo("11-开始在B1点检测物体...")
             self.is_retry_attempt = False  # 重置重试标记
-            self.start_detection_phase()
+            self.start_preliminary_detection()
             
         elif self.current_state == RobotState.DETECT_AT_A1:
             rospy.loginfo("12-开始在A1点检测物体...")
             self.is_retry_attempt = False  # 重置重试标记
-            self.start_detection_phase()
+            self.start_preliminary_detection()
 
     def handle_event(self, event):
         event_name = self.event_name(event)
@@ -346,11 +347,45 @@ class RobotStateMachine(object):
         if self.detected_objects_buffer:
             rospy.logdebug("收到检测对象: %d 个", len(self.detected_objects_buffer))
 
-    def start_detection_phase(self):
-        """开始检测阶段，清空缓冲区并根据是否为重试决定检测方式"""
+    def start_preliminary_detection(self):
+        """开始初步静态检测，清空缓冲区并设置短暂的定时器"""
         self.detected_objects_buffer = []
         self.best_detection = None  # 重置最佳检测结果
         
+        # 如果存在旧的定时器，关闭它
+        if self.detection_timer:
+            self.detection_timer.shutdown()
+        
+        rospy.loginfo("初步静态检测 - 观察%.2f秒 (置信度阈值: %.2f)", PRELIMINARY_DETECTION_DURATION, PRIMARY_CONFIDENCE_THRESHOLD)
+        
+        # 创建定时器，PRELIMINARY_DETECTION_DURATION秒后评估初步检测结果
+        self.detection_timer = rospy.Timer(
+            rospy.Duration(PRELIMINARY_DETECTION_DURATION),
+            self.evaluate_preliminary_detection,
+            oneshot=True
+        )
+        
+    def evaluate_preliminary_detection(self, timer_event=None):
+        """评估初步静态检测结果，决定是否需要进行左右看"""
+        # 检查是否有任何物体的置信度超过阈值（不限于任务物品）
+        any_high_confidence_detection = False
+        
+        for box in self.detected_objects_buffer:
+            if box.probability > PRIMARY_CONFIDENCE_THRESHOLD:
+                any_high_confidence_detection = True
+                break
+                
+        if any_high_confidence_detection:
+            # 如果有高置信度物体，直接结束检测并分析结果
+            rospy.loginfo("初步检测发现高置信度物体，直接分析结果...")
+            self.finish_detection_phase(None)
+        else:
+            # 如果没有高置信度物体，启动左右看检测
+            rospy.loginfo("初步检测未发现高置信度物体，开始左右看检测...")
+            self.start_detection_phase()
+            
+    def start_detection_phase(self):
+        """开始检测阶段，根据是否为重试决定检测方式"""
         # 如果存在旧的定时器，关闭它
         if self.detection_timer:
             self.detection_timer.shutdown()
@@ -392,39 +427,43 @@ class RobotStateMachine(object):
             # 未找到任务物品，进行详细日志输出
             rospy.logwarn("在%s未找到符合任务 '%s' 的物品。", room_name, self.current_task_type)
             
-            # 检查是否有其他高置信度的（但非任务相关的）检测结果
+            # 日志记录和决策逻辑
             anything_else_seen = False
             low_confidence_items = {}
-            current_threshold = SECONDARY_CONFIDENCE_THRESHOLD if self.is_retry_attempt else PRIMARY_CONFIDENCE_THRESHOLD
             valid_objects = self.TASK_CATEGORIES.get(self.current_task_type, [])
-
-            # 使用一个集合来避免重复打印相同的警告
             already_warned = set()
+
             for box in self.detected_objects_buffer:
-                if box.probability > current_threshold:
+                # 检查是否有任务外的、但置信度足够高的物品
+                if box.probability > PRIMARY_CONFIDENCE_THRESHOLD:
                     if box.Class not in valid_objects and box.Class not in already_warned:
-                        rospy.logwarn("  - (警告) 检测到任务外物品: %s (置信度: %.2f)", box.Class, box.probability)
+                        rospy.logwarn("  - (警告) 检测到任务外高置信度物品: %s (置信度: %.2f)", box.Class, box.probability)
                         anything_else_seen = True
                         already_warned.add(box.Class)
-                else:
-                    # 记录低置信度物品，只保留每种物品的最高置信度
+                
+                # 记录所有低置信度的物品
+                if box.probability <= PRIMARY_CONFIDENCE_THRESHOLD:
                     if box.Class not in low_confidence_items or box.probability > low_confidence_items[box.Class]:
                         low_confidence_items[box.Class] = box.probability
 
-            if not anything_else_seen:
-                rospy.loginfo("  - (备注) 未检测到任何其他高置信度物品。")
-            
-            # 新增：报告检测到的低置信度物品
             if low_confidence_items:
                 low_conf_str = ", ".join(["%s (%.2f)" % (k, v) for k, v in low_confidence_items.items()])
                 rospy.loginfo("  - (备注) 检测到低置信度物品 (已忽略): %s", low_conf_str)
 
-            # 根据是否是初次尝试决定下一步操作
+            # --- 新的决策逻辑 ---
             if not self.is_retry_attempt:
-                rospy.loginfo("  -> 进入第二阶段重试...")
-                self.is_retry_attempt = True
-                self.start_detection_phase()
+                # 这是第一轮检测（包括初步静态检测和左右看）
+                if anything_else_seen:
+                    # 分支1: 找到了任务外的高置信度物品，搜索结束
+                    rospy.loginfo("  -> 发现高置信度物品，该点搜索完成，不再重试。")
+                    self.handle_event(Event.DETECT_DONE_NOT_FOUND)
+                else:
+                    # 分支2: 什么高置信度的都没看到，进入重试
+                    rospy.loginfo("  -> 未发现任何高置信度物品，进入第二阶段重试...")
+                    self.is_retry_attempt = True
+                    self.start_detection_phase()
             else:
+                # 分支3: 这已经是重试阶段，仍然没找到任务物品
                 rospy.loginfo("  -> 重试失败，放弃该点检测。")
                 self.handle_event(Event.DETECT_DONE_NOT_FOUND)
         
