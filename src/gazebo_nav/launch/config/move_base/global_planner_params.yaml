@@ -32,8 +32,8 @@ GlobalPlanner:
   old_navfn_behavior: false
 
   lethal_cost: 253
-  neutral_cost: 80
-  cost_factor: 15.0
+  neutral_cost: 60
+  cost_factor: 20.0
   publish_potential: true
   orientation_mode: 0
   orientation_window_size: 1
