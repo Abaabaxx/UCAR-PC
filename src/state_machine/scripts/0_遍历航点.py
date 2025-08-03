@@ -22,6 +22,9 @@ from std_srvs.srv import Trigger, TriggerResponse
 创建时间：2024-08-02
 """
 
+# 定义导航超时常量（单位：秒）
+NAV_TIMEOUT_SECONDS = 30.0
+
 class RobotState(object):
     IDLE = 0
     NAV_TO_C1 = 1
@@ -45,6 +48,9 @@ class RobotStateMachine(object):
         
         # 记录进入救援状态前的导航状态
         self.previous_nav_state = None
+        
+        # 初始化导航超时定时器
+        self.nav_timeout_timer = None
         
         # 初始化状态机
         self.setup()
@@ -251,11 +257,33 @@ class RobotStateMachine(object):
             self.move_base_client.send_goal(goal, done_cb=self.navigation_done_callback)
             rospy.loginfo("导航至: %s", self.state_name(waypoint_state))
             self.navigation_active = True
+            
+            # 关闭旧的超时定时器（如果存在）
+            if self.nav_timeout_timer:
+                self.nav_timeout_timer.shutdown()
+                
+            # 创建新的超时定时器
+            self.nav_timeout_timer = rospy.Timer(
+                rospy.Duration(NAV_TIMEOUT_SECONDS),
+                self.navigation_timeout_callback,
+                oneshot=True
+            )
         else:
             rospy.logerr("未知航点: %s", self.state_name(waypoint_state))
             self.handle_event(Event.NAV_DONE_FAILURE)
 
+    def navigation_timeout_callback(self, event):
+        """导航超时回调函数"""
+        rospy.logwarn("导航超时（%s秒）！取消导航目标...", NAV_TIMEOUT_SECONDS)
+        self.move_base_client.cancel_all_goals()
+        # 注意：取消目标会自动触发navigation_done_callback，
+        # 因此不需要在这里手动触发NAV_DONE_FAILURE事件
+
     def navigation_done_callback(self, status, result):
+        # 首先关闭超时定时器
+        if self.nav_timeout_timer:
+            self.nav_timeout_timer.shutdown()
+            
         self.navigation_active = False
         
         if status == actionlib.GoalStatus.SUCCEEDED:
@@ -295,6 +323,9 @@ class RobotStateMachine(object):
     def stop_all_activities(self):
         if self.navigation_active:
             self.move_base_client.cancel_all_goals()
+            # 关闭超时定时器
+            if self.nav_timeout_timer:
+                self.nav_timeout_timer.shutdown()
             self.navigation_active = False
         # 确保机器人停止运动
         twist = Twist()
