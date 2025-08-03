@@ -35,7 +35,7 @@ LOOK_RIGHT_DURATION = 1.0  # 向右看的时间（秒）
 
 # 定义置信度过滤阈值（可调节）
 PRIMARY_CONFIDENCE_THRESHOLD = 0.9  # 第一阶段（左右看）的置信度阈值
-SECONDARY_CONFIDENCE_THRESHOLD = 0.5  # 第二阶段（重试）的置信度阈值
+SECONDARY_CONFIDENCE_THRESHOLD = 0.7  # 第二阶段（重试）的置信度阈值
 RETRY_DETECTION_DURATION = 2.0  # 重试检测的持续时间（秒）
 
 class RobotState(object):
@@ -381,24 +381,51 @@ class RobotStateMachine(object):
         else:
             room_name = "未知房间"
         
-        # 检查是否找到了符合置信度要求的最佳检测结果
+        # 检查是否找到了符合任务和置信度要求的最佳检测结果
         if self.best_detection is not None:
-            # 找到了符合要求的物体，记录物体及其位置
+            # 成功找到任务物品
             self.found_objects_locations[self.best_detection.Class] = room_name
-            
-            rospy.loginfo("在%s检测到物体: %s (置信度: %.2f)", 
+            rospy.logwarn("在%s检测到任务物品: %s (置信度: %.2f)", 
                         room_name, self.best_detection.Class, self.best_detection.probability)
             self.handle_event(Event.DETECT_DONE_FOUND)
         else:
-            # 未找到符合要求的物体
+            # 未找到任务物品，进行详细日志输出
+            rospy.logwarn("在%s未找到符合任务 '%s' 的物品。", room_name, self.current_task_type)
+            
+            # 检查是否有其他高置信度的（但非任务相关的）检测结果
+            anything_else_seen = False
+            low_confidence_items = {}
+            current_threshold = SECONDARY_CONFIDENCE_THRESHOLD if self.is_retry_attempt else PRIMARY_CONFIDENCE_THRESHOLD
+            valid_objects = self.TASK_CATEGORIES.get(self.current_task_type, [])
+
+            # 使用一个集合来避免重复打印相同的警告
+            already_warned = set()
+            for box in self.detected_objects_buffer:
+                if box.probability > current_threshold:
+                    if box.Class not in valid_objects and box.Class not in already_warned:
+                        rospy.logwarn("  - (警告) 检测到任务外物品: %s (置信度: %.2f)", box.Class, box.probability)
+                        anything_else_seen = True
+                        already_warned.add(box.Class)
+                else:
+                    # 记录低置信度物品，只保留每种物品的最高置信度
+                    if box.Class not in low_confidence_items or box.probability > low_confidence_items[box.Class]:
+                        low_confidence_items[box.Class] = box.probability
+
+            if not anything_else_seen:
+                rospy.loginfo("  - (备注) 未检测到任何其他高置信度物品。")
+            
+            # 新增：报告检测到的低置信度物品
+            if low_confidence_items:
+                low_conf_str = ", ".join(["%s (%.2f)" % (k, v) for k, v in low_confidence_items.items()])
+                rospy.loginfo("  - (备注) 检测到低置信度物品 (已忽略): %s", low_conf_str)
+
+            # 根据是否是初次尝试决定下一步操作
             if not self.is_retry_attempt:
-                # 第一阶段失败，进入重试阶段
-                rospy.loginfo("在%s未检测到符合高置信度要求的物体，开始重试检测...", room_name)
+                rospy.loginfo("  -> 进入第二阶段重试...")
                 self.is_retry_attempt = True
                 self.start_detection_phase()
             else:
-                # 重试阶段也失败，彻底放弃该点检测
-                rospy.loginfo("在%s重试检测也未找到符合要求的物体，放弃检测", room_name)
+                rospy.loginfo("  -> 重试失败，放弃该点检测。")
                 self.handle_event(Event.DETECT_DONE_NOT_FOUND)
         
         # 清空检测缓冲区
