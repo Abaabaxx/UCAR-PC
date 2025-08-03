@@ -34,7 +34,7 @@ LOOK_LEFT_DURATION = 0.5  # 向左看的时间（秒）
 LOOK_RIGHT_DURATION = 1.0  # 向右看的时间（秒）
 
 # 定义置信度过滤阈值（可调节）
-PRIMARY_CONFIDENCE_THRESHOLD = 0.8  # 第一阶段（左右看）的置信度阈值
+PRIMARY_CONFIDENCE_THRESHOLD = 0.9  # 第一阶段（左右看）的置信度阈值
 SECONDARY_CONFIDENCE_THRESHOLD = 0.5  # 第二阶段（重试）的置信度阈值
 RETRY_DETECTION_DURATION = 2.0  # 重试检测的持续时间（秒）
 
