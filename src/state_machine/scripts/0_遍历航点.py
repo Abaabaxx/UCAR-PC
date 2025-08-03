@@ -5,12 +5,12 @@ import rospy
 import actionlib
 from std_msgs.msg import String
 from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, Twist
 from std_srvs.srv import Trigger, TriggerResponse
 
 """
 遍历航点状态机
-功能：控制机器人依次导航到6个预设点位，支持导航失败时的自动重试
+功能：控制机器人依次导航到6个预设点位，导航失败时执行原地旋转脱困
 
 使用方法：
 1. 启动状态机：
@@ -31,21 +31,20 @@ class RobotState(object):
     NAV_TO_MIDPOINT = 5
     NAV_TO_END = 6
     COMPLETED = 7
-    ERROR = 99
+    RESCUE_ROTATION = 8
 
 class Event(object):
     START_CMD = 0
     NAV_DONE_SUCCESS = 1
     NAV_DONE_FAILURE = 2
+    RESCUE_DONE = 3
 
 class RobotStateMachine(object):
     def __init__(self):
         rospy.init_node('waypoint_follower_state_machine')
         
-        # 重试相关变量
-        self.retry_count = 0
-        self.MAX_RETRIES = 3
-        self.current_goal = None
+        # 记录进入救援状态前的导航状态
+        self.previous_nav_state = None
         
         # 初始化状态机
         self.setup()
@@ -63,6 +62,7 @@ class RobotStateMachine(object):
 
     def init_ros_comm(self):
         self.state_pub = rospy.Publisher('/robot/current_state', String, queue_size=1)
+        self.cmd_vel_pub = rospy.Publisher('/cmd_vel', Twist, queue_size=1)
         
         self.move_base_client = actionlib.SimpleActionClient('/move_base', MoveBaseAction)
         rospy.loginfo("等待导航服务器...")
@@ -151,9 +151,9 @@ class RobotStateMachine(object):
         elif self.current_state == RobotState.COMPLETED:
             rospy.loginfo("7-任务完成！所有航点已成功导航")
             
-        elif self.current_state == RobotState.ERROR:
-            rospy.logerr("99-错误状态，停止所有活动")
-            self.stop_all_activities()
+        elif self.current_state == RobotState.RESCUE_ROTATION:
+            rospy.loginfo("8-旋转脱困：开始执行2秒旋转...")
+            self.perform_rescue_rotation()
 
     def handle_event(self, event):
         event_name = self.event_name(event)
@@ -167,37 +167,48 @@ class RobotStateMachine(object):
             if event == Event.NAV_DONE_SUCCESS:
                 self.transition(RobotState.NAV_TO_C2)
             elif event == Event.NAV_DONE_FAILURE:
-                self.transition(RobotState.ERROR)
+                self.previous_nav_state = self.current_state
+                self.transition(RobotState.RESCUE_ROTATION)
                 
         elif self.current_state == RobotState.NAV_TO_C2:
             if event == Event.NAV_DONE_SUCCESS:
                 self.transition(RobotState.NAV_TO_B1)
             elif event == Event.NAV_DONE_FAILURE:
-                self.transition(RobotState.ERROR)
+                self.previous_nav_state = self.current_state
+                self.transition(RobotState.RESCUE_ROTATION)
                 
         elif self.current_state == RobotState.NAV_TO_B1:
             if event == Event.NAV_DONE_SUCCESS:
                 self.transition(RobotState.NAV_TO_A1)
             elif event == Event.NAV_DONE_FAILURE:
-                self.transition(RobotState.ERROR)
+                self.previous_nav_state = self.current_state
+                self.transition(RobotState.RESCUE_ROTATION)
                 
         elif self.current_state == RobotState.NAV_TO_A1:
             if event == Event.NAV_DONE_SUCCESS:
                 self.transition(RobotState.NAV_TO_MIDPOINT)
             elif event == Event.NAV_DONE_FAILURE:
-                self.transition(RobotState.ERROR)
+                self.previous_nav_state = self.current_state
+                self.transition(RobotState.RESCUE_ROTATION)
                 
         elif self.current_state == RobotState.NAV_TO_MIDPOINT:
             if event == Event.NAV_DONE_SUCCESS:
                 self.transition(RobotState.NAV_TO_END)
             elif event == Event.NAV_DONE_FAILURE:
-                self.transition(RobotState.ERROR)
+                self.previous_nav_state = self.current_state
+                self.transition(RobotState.RESCUE_ROTATION)
                 
         elif self.current_state == RobotState.NAV_TO_END:
             if event == Event.NAV_DONE_SUCCESS:
                 self.transition(RobotState.COMPLETED)
             elif event == Event.NAV_DONE_FAILURE:
-                self.transition(RobotState.ERROR)
+                self.previous_nav_state = self.current_state
+                self.transition(RobotState.RESCUE_ROTATION)
+                
+        elif self.current_state == RobotState.RESCUE_ROTATION:
+            if event == Event.RESCUE_DONE:
+                if self.previous_nav_state is not None:
+                    self.transition(self.previous_nav_state)
 
     def start_callback(self, req):
         if self.current_state == RobotState.IDLE:
@@ -237,11 +248,6 @@ class RobotStateMachine(object):
             goal.target_pose = self.waypoints[waypoint_state]
             goal.target_pose.header.stamp = rospy.Time.now()
             
-            # 保存当前目标，用于重试
-            self.current_goal = goal
-            # 重置重试计数
-            self.retry_count = 0
-            
             self.move_base_client.send_goal(goal, done_cb=self.navigation_done_callback)
             rospy.loginfo("导航至: %s", self.state_name(waypoint_state))
             self.navigation_active = True
@@ -254,40 +260,45 @@ class RobotStateMachine(object):
         
         if status == actionlib.GoalStatus.SUCCEEDED:
             rospy.loginfo("导航成功！")
-            # 延迟0.5秒后触发成功事件，与原始状态机保持一致
             rospy.Timer(rospy.Duration(0.5), 
                       lambda event: self.handle_event(Event.NAV_DONE_SUCCESS), 
                       oneshot=True)
         else:
-            # 导航失败，增加重试计数
-            self.retry_count += 1
-            
-            if self.retry_count < self.MAX_RETRIES:
-                rospy.logwarn("导航失败，状态码: %d，正在进行第 %d 次重试...", status, self.retry_count)
-                
-                # 等待1秒后重试
-                rospy.Timer(rospy.Duration(1.0), 
-                          lambda event: self.retry_navigation(), 
-                          oneshot=True)
-            else:
-                rospy.logerr("导航失败，状态码: %d，已达到最大重试次数 %d，放弃导航", 
-                           status, self.MAX_RETRIES)
-                self.handle_event(Event.NAV_DONE_FAILURE)
-
-    def retry_navigation(self):
-        """重新发送当前导航目标"""
-        if self.current_goal:
-            rospy.loginfo("重新发送导航目标...")
-            self.move_base_client.send_goal(self.current_goal, done_cb=self.navigation_done_callback)
-            self.navigation_active = True
-        else:
-            rospy.logerr("无法重试：当前目标为空")
+            rospy.logwarn("导航失败，状态码: %d，准备进入旋转救援...", status)
             self.handle_event(Event.NAV_DONE_FAILURE)
+
+    def perform_rescue_rotation(self):
+        """执行旋转救援动作"""
+        # 创建旋转速度指令
+        twist = Twist()
+        twist.angular.z = 2.0  # 2 rad/s
+        
+        # 发布旋转速度
+        self.cmd_vel_pub.publish(twist)
+        rospy.loginfo("开始旋转...")
+        
+        # 启动定时器，2秒后停止旋转
+        rospy.Timer(rospy.Duration(2.0), 
+                   lambda event: self.stop_rotation_and_recover(), 
+                   oneshot=True)
+
+    def stop_rotation_and_recover(self):
+        """停止旋转并触发恢复事件"""
+        # 发布零速度指令停止旋转
+        twist = Twist()
+        self.cmd_vel_pub.publish(twist)
+        rospy.loginfo("旋转完成，准备重新导航...")
+        
+        # 触发救援完成事件
+        self.handle_event(Event.RESCUE_DONE)
 
     def stop_all_activities(self):
         if self.navigation_active:
             self.move_base_client.cancel_all_goals()
             self.navigation_active = False
+        # 确保机器人停止运动
+        twist = Twist()
+        self.cmd_vel_pub.publish(twist)
         rospy.loginfo("已停止所有活动")
 
 if __name__ == '__main__':
