@@ -46,7 +46,8 @@ class RobotState(object):
     SPEAK_LANE2_CLEAR = 17
     NAV_TO_LANE2_WAITING_POINT = 18
     SHUTDOWN_FINAL_NODES = 19
-    LINE_FOLLOWING = 20
+    RELAUNCH_CAMERA_FOR_LINE_FOLLOWING = 20 # 新增：为巡线重启摄像头状态
+    LINE_FOLLOWING = 21
     ERROR = 99
 
 # 事件常量定义
@@ -107,6 +108,13 @@ class RobotStateMachine(object):
         self.board_detect_process = None
         self.search_monitor_timer = None
         self.search_timeout_timer = None
+        self.camera_process = None
+        
+        # 新增：为巡线任务重启摄像头相关变量
+        # 请根据 `rosnode list` 确认摄像头的确切节点名称
+        self.camera_node_name = "/usb_cam"
+        # 用于巡线的高帧率摄像头launch命令
+        self.camera_line_following_launch_command = ['roslaunch', 'lby_usb_cam', 'usb_cam_noimg.launch']
         
         # 新增目标点目录路径
         self.goals_up_dir = "/home/ucar/lby_ws/src/board_detect/goals_up"
@@ -726,13 +734,14 @@ class RobotStateMachine(object):
     
     # 新增：检查最终节点关闭状态
     def _check_nodes_shutdown_status(self, event):
-        """检查/darknet_ros, /move_base, /amcl节点是否已关闭"""
+        """检查/darknet_ros, /move_base, /amcl以及摄像头节点是否已关闭"""
         try:
             # 获取当前所有节点名称
             node_names = rosnode.get_node_names()
             
             # 检查所有目标节点是否已不存在
-            if '/darknet_ros' not in node_names and \
+            if self.camera_node_name not in node_names and \
+               '/darknet_ros' not in node_names and \
                '/move_base' not in node_names and \
                '/amcl' not in node_names:
                 rospy.loginfo("确认所有目标节点已成功关闭")
@@ -749,7 +758,8 @@ class RobotStateMachine(object):
                 # 触发节点关闭完成事件
                 self.handle_event(Event.NODES_SHUTDOWN_COMPLETE)
             else:
-                rospy.loginfo("等待节点关闭，仍在运行的节点: %s, %s, %s",
+                rospy.loginfo("等待节点关闭，仍在运行的节点: camera=%s, darknet=%s, move_base=%s, amcl=%s",
+                              self.camera_node_name in node_names,
                               '/darknet_ros' in node_names,
                               '/move_base' in node_names,
                               '/amcl' in node_names)
@@ -934,8 +944,10 @@ class RobotStateMachine(object):
             self.send_nav_goal('lane2_waiting_point')
             self.navigation_active = True
         elif self.current_state == RobotState.SHUTDOWN_FINAL_NODES:
-            rospy.loginfo("正在尝试关闭最终节点: /darknet_ros, /move_base, /amcl...")
-            # 发送关闭命令
+            rospy.loginfo("正在尝试关闭最终节点: %s, /darknet_ros, /move_base, /amcl...", self.camera_node_name)
+            # 首先关闭摄像头
+            subprocess.call(['rosnode', 'kill', self.camera_node_name])
+            # 然后关闭其他导航和检测相关的节点
             subprocess.call(['rosnode', 'kill', '/darknet_ros'])
             subprocess.call(['rosnode', 'kill', '/move_base'])
             subprocess.call(['rosnode', 'kill', '/amcl'])
@@ -952,6 +964,19 @@ class RobotStateMachine(object):
                 self._handle_nodes_shutdown_timeout,
                 oneshot=True
             )
+        elif self.current_state == RobotState.RELAUNCH_CAMERA_FOR_LINE_FOLLOWING:
+            rospy.loginfo("所有节点已关闭。等待2秒后为巡线任务重启摄像头...")
+            rospy.sleep(2.0)
+            try:
+                rospy.loginfo("正在执行命令: %s", ' '.join(self.camera_line_following_launch_command))
+                self.camera_process = subprocess.Popen(self.camera_line_following_launch_command)
+                rospy.loginfo("摄像头启动命令已发送，进程ID: %s", self.camera_process.pid)
+                # 启动后稍作等待，确保节点有时间初始化
+                rospy.sleep(2.0)
+                self.transition(RobotState.LINE_FOLLOWING)
+            except Exception as e:
+                rospy.logerr("启动摄像头launch文件失败: %s", str(e))
+                self.transition(RobotState.ERROR)
         elif self.current_state == RobotState.LINE_FOLLOWING:
             rospy.loginfo("进入最终巡线状态，任务完成。")
             pass
@@ -1055,7 +1080,7 @@ class RobotStateMachine(object):
                 self.transition(RobotState.ERROR)
         elif self.current_state == RobotState.SHUTDOWN_FINAL_NODES:
             if event == Event.NODES_SHUTDOWN_COMPLETE:
-                self.transition(RobotState.LINE_FOLLOWING)
+                self.transition(RobotState.RELAUNCH_CAMERA_FOR_LINE_FOLLOWING)
             elif event == Event.NODES_SHUTDOWN_TIMEOUT:
                 self.transition(RobotState.ERROR)
 
