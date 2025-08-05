@@ -18,6 +18,8 @@ import os
 import yaml  # 新增导入
 import glob  # 新增导入
 import threading
+import roslibpy  # 新增导入
+import time      # 新增导入
 from darknet_ros_msgs.msg import BoundingBoxes  # 新增导入YOLO检测结果消息类型
 from xf_mic_asr_offline.srv import VoiceCmd, VoiceCmdRequest
 import rosnode  # 添加rosnode模块导入
@@ -143,6 +145,67 @@ class RobotStateMachine(object):
         self.yolo_shutdown_check_timer = None
         self.yolo_shutdown_timeout_timer = None
         self.yolo_shutdown_timeout_duration = 5.0  # 关闭节点的总超时时间(秒)
+
+        # 新增：仿真任务相关变量
+        self.PC_IP = '192.168.68.206'  # 请确保这是您电脑的正确IP地址
+        self.simulation_found_item = None
+        self.simulation_room_location = None
+
+    # 新增：调用电脑端仿真服务
+    def _call_simulation_service(self):
+        """
+        连接到电脑端的rosbridge并调用仿真服务，阻塞等待结果。
+        """
+        rospy.loginfo("准备连接电脑端 rosbridge at %s:9090", self.PC_IP)
+        client = roslibpy.Ros(host=self.PC_IP, port=9090)
+        
+        try:
+            # 启动客户端连接线程
+            client.run()
+            
+            # 使用带超时的循环等待连接建立
+            connect_timeout = 5.0  # 5秒连接超时
+            start_time = time.time()
+            while not client.is_connected:
+                if time.time() - start_time > connect_timeout:
+                    rospy.logerr("连接电脑端 rosbridge 超时。")
+                    client.terminate()
+                    return False
+                time.sleep(0.1)
+
+            rospy.loginfo("连接电脑端成功！准备调用 /start_state_machine 服务。")
+            
+            # 定义服务
+            service_name = '/start_state_machine'
+            find_item_service = roslibpy.Service(client, service_name, 'ucar2pc/FindItem')
+            
+            # 准备请求
+            chosen_item = self.current_task
+            log_display_names = {'fruits': '水果', 'vegetables': '蔬菜', 'desserts': '甜品'}
+            rospy.loginfo("请求仿真任务，寻找目标: %s (发送: %s)", log_display_names.get(chosen_item, '未知'), chosen_item)
+            
+            request = roslibpy.ServiceRequest({'item_to_find': chosen_item})
+            
+            # 调用服务并等待结果
+            rospy.loginfo("正在发送请求并等待仿真任务完成...")
+            response = find_item_service.call(request)
+            
+            # 【关键步骤：记录结果】
+            self.simulation_room_location = response.get('room_location', 'unknown_room')
+            self.simulation_found_item = response.get('found_item_name', 'not_found')
+            
+            rospy.loginfo("收到仿真端响应: 房间=%s, 物品=%s", self.simulation_room_location, self.simulation_found_item)
+            
+            return True
+
+        except Exception as e:
+            rospy.logerr("调用仿真服务时发生错误: %s", e)
+            return False
+        finally:
+            if client.is_connected:
+                client.terminate()
+                rospy.loginfo("与电脑端的连接已关闭。")
+
 
     # 新增：检查目标货物方法
    # 修正后的 check_for_target_goods 方法
@@ -808,8 +871,14 @@ class RobotStateMachine(object):
             self.send_nav_goal('simulation_area')
             self.navigation_active = True
         elif self.current_state == RobotState.DO_SIMULATION_TASKS:
-            rospy.loginfo("开始执行3秒仿真任务...")
-            rospy.Timer(rospy.Duration(3.0), self._simulation_timer_callback, oneshot=True)
+            rospy.loginfo("开始执行仿真任务，调用电脑端服务...")
+            # 调用仿真服务并根据结果触发事件
+            success = self._call_simulation_service()
+            if success:
+                self.handle_event(Event.SIMULATION_DONE)
+            else:
+                rospy.logerr("仿真任务执行失败。")
+                self.handle_event(Event.NAV_DONE_FAILURE) # 复用导航失败事件
         elif self.current_state == RobotState.SPEAK_ROOM:
             rospy.loginfo("进入房间播报状态，开始模拟播报，持续3秒...")
             rospy.Timer(rospy.Duration(3.0), self._speak_room_timer_callback, oneshot=True)
@@ -915,8 +984,11 @@ class RobotStateMachine(object):
             elif event == Event.NAV_DONE_FAILURE:
                 rospy.logerr("导航至仿真区失败。")
                 self.transition(RobotState.ERROR)
-        elif self.current_state == RobotState.DO_SIMULATION_TASKS and event == Event.SIMULATION_DONE:
-            self.transition(RobotState.SPEAK_ROOM)
+        elif self.current_state == RobotState.DO_SIMULATION_TASKS:
+            if event == Event.SIMULATION_DONE:
+                self.transition(RobotState.SPEAK_ROOM)
+            elif event == Event.NAV_DONE_FAILURE: # 复用导航失败事件
+                self.transition(RobotState.ERROR)
         elif self.current_state == RobotState.SPEAK_ROOM and event == Event.SPEAK_DONE:
             self.transition(RobotState.NAV_TO_TRAFFIC)
         elif self.current_state == RobotState.NAV_TO_TRAFFIC and event == Event.SPEAK_DONE:
