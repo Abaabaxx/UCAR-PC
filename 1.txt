@@ -1,0 +1,95 @@
+
+################################################################
+# ROS 用户/网络环境 配置切换器
+################################################################
+
+# 说明:
+# 1. 只需修改下面的 ROS_USER 变量, 即可在不同配置间切换。
+# 2. 可选值: "standalone" (单机模式, 禁用主从),
+#           "lby_iphone" (刘博源-iPhone热点),
+#           "lby_redmi"  (刘博源-Redmi热点),
+#           "zym"        (张钰铭)
+# 3. 修改后, 请执行 `source ~/.bashrc` 或重新打开终端以生效。
+
+
+# --- 【你唯一需要修改的地方】 ---
+# 在这里切换为 "standalone", "lby_iphone", "lby_redmi" 或 "zym"
+export ROS_USER="tianbot_lby_redmi" # 默认设置为单机模式，请根据需要修改
+
+
+# --- 根据上面的配置, 自动加载对应的环境变量 ---
+if [ "$ROS_USER" = "standalone" ]; then
+    ##############################################################
+    echo "✅ 已加载【单机模式 (standalone)】, 主从机已禁用"
+    ##############################################################
+
+    # 代理配置 (本地代理, 保持开启以方便apt/git等操作)
+    export http_proxy="http://127.0.0.1:7890"
+    export https_proxy="http://127.0.0.1:7890"
+
+    # ROS分布式通信架构 (禁用)
+    # 通过 unset 取消设置, ROS将自动使用localhost
+    unset ROS_MASTER_URI
+    unset ROS_IP
+    unset ROS_HOSTNAME
+
+elif [ "$ROS_USER" = "lby_iphone" ]; then
+    ##############################################################
+    echo "✅ 已加载【刘博源 (lby_iphone)】的配置"
+    ##############################################################
+
+    # 代理配置 (本地代理)
+    export http_proxy="http://127.0.0.1:7890"
+    export https_proxy="http://127.0.0.1:7890"
+
+    # ROS分布式通信架构
+    export ROS_MASTER_URI="http://172.20.10.5:11311"
+    export ROS_IP="172.20.10.3"
+    export ROS_HOSTNAME="172.20.10.3"
+
+elif [ "$ROS_USER" = "ucar_lby_redmi" ]; then
+    ##############################################################
+    echo "✅ 已加载【刘博源 (ucar_lby_redmi)】的配置"
+    ##############################################################
+
+    # 代理配置 (本地代理)
+    export http_proxy="http://127.0.0.1:7890"
+    export https_proxy="http://127.0.0.1:7890"
+
+    # ROS分布式通信架构 (请根据Redmi热点下本机的实际IP修改)
+    # 你可以在终端输入 `ifconfig` 或 `ip addr` 来查找本机在Redmi热点下的IP地址
+    export ROS_MASTER_URI="http://192.168.68.142:11311"
+    export ROS_IP="192.168.68.1"
+    export ROS_HOSTNAME="192.168.68.1"
+
+elif [ "$ROS_USER" = "tianbot_lby_redmi" ]; then
+    ##############################################################
+    echo "✅ 已加载【刘博源 (tianbot_lby_redmi)】的配置"
+    ##############################################################
+
+    # 代理配置 (本地代理)
+    export http_proxy="http://127.0.0.1:7890"
+    export https_proxy="http://127.0.0.1:7890"
+
+    # ROS分布式通信架构 (请根据Redmi热点下本机的实际IP修改)
+    # 你可以在终端输入 `ifconfig` 或 `ip addr` 来查找本机在Redmi热点下的IP地址
+    export ROS_MASTER_URI="http://192.168.68.142:11311"
+    export ROS_IP="192.168.68.1"
+    export ROS_HOSTNAME="192.168.68.1"
+elif [ "$ROS_USER" = "zym" ]; then
+    ##############################################################
+    echo "✅ 已加载【张钰铭 (zym)】的配置"
+    ##############################################################
+
+    # 代理配置 (本地代理)
+    export http_proxy="http://127.0.0.1:7890"
+    export https_proxy="http://127.0.0.1:7890"
+
+    # ROS分布式通信架构
+    export ROS_MASTER_URI="http://172.20.10.6:11311"
+    export ROS_IP="172.20.10.6"
+    export ROS_HOSTNAME="172.20.10.6" 
+
+else
+    echo "⚠️ 未知的 ROS_USER: '$ROS_USER'。未加载任何特殊配置。"
+fi
