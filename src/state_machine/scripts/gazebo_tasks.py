@@ -3,11 +3,13 @@
 
 import rospy
 import actionlib
+import threading
 from std_msgs.msg import String
 from move_base_msgs.msg import MoveBaseAction, MoveBaseGoal
 from geometry_msgs.msg import PoseStamped, Twist
 from std_srvs.srv import Trigger, TriggerResponse
 from darknet_ros_msgs.msg import BoundingBoxes  # 导入新的消息类型
+from ucar2pc.srv import FindItem, FindItemResponse
 
 """
 遍历航点状态机
@@ -16,13 +18,13 @@ from darknet_ros_msgs.msg import BoundingBoxes  # 导入新的消息类型
 
 使用方法：
 1. 启动状态机：
-   rosservice call /start_state_machine "{}"
+   rosservice call /start_state_machine "item_to_find: 'fruits'"
 2. 重置状态机：
    rosservice call /reset_state_machine "{}"
 
 作者：Claude 3.7 Sonnet
 创建时间：2024-08-02
-修改时间：2025-08-03
+修改时间：2025-08-04
 """
 
 # 定义导航超时常量（单位：秒）
@@ -67,10 +69,9 @@ class Event(object):
 class RobotStateMachine(object):
     # 定义任务类别及对应的物品
     TASK_CATEGORIES = {
-        'fruits': ['apple', 'orange', 'banana', 'pear'],
-        'electronics': ['laptop', 'cell phone', 'keyboard', 'mouse'],
-        'furniture': ['chair', 'sofa', 'table', 'bed'],
-        'kitchen': ['cup', 'bowl', 'bottle', 'fork', 'knife', 'spoon']
+        'desserts': ['cake', 'cola', 'milk'],
+        'fruits': ['apple', 'banana', 'watermelon'],
+        'vegetables': ['pepper', 'tomato', 'potato']
     }
     def __init__(self):
         rospy.init_node('waypoint_follower_state_machine')
@@ -80,6 +81,11 @@ class RobotStateMachine(object):
         
         # 初始化导航超时定时器
         self.nav_timeout_timer = None
+        
+        # 初始化线程同步机制
+        self.state_lock = threading.Lock()
+        self.task_completion_event = threading.Event()
+        self.service_response = None
         
         # 初始化检测相关变量
         self.detected_objects_buffer = []
@@ -99,18 +105,23 @@ class RobotStateMachine(object):
         self.publish_state()
 
     def setup(self):
-        self.current_state = RobotState.IDLE
-        self.navigation_active = False
-        
-        # 重置检测相关变量
-        self.detected_objects_buffer = []
-        self.current_task_type = None
-        self.found_objects_locations = {}
-        self.is_retry_attempt = False  # 标记是否为重试检测
-        self.best_detection = None  # 存储最佳检测结果
-        if self.detection_timer:
-            self.detection_timer.shutdown()
-            self.detection_timer = None
+        with self.state_lock:
+            self.current_state = RobotState.IDLE
+            self.navigation_active = False
+            
+            # 重置检测相关变量
+            self.detected_objects_buffer = []
+            self.current_task_type = None
+            self.found_objects_locations = {}
+            self.is_retry_attempt = False  # 标记是否为重试检测
+            self.best_detection = None  # 存储最佳检测结果
+            if self.detection_timer:
+                self.detection_timer.shutdown()
+                self.detection_timer = None
+            
+            # 重置服务相关变量
+            self.task_completion_event.clear()
+            self.service_response = None
 
     def init_ros_comm(self):
         self.state_pub = rospy.Publisher('/robot/current_state', String, queue_size=1)
@@ -124,7 +135,7 @@ class RobotStateMachine(object):
         self.yolo_subscriber = rospy.Subscriber('/darknet_ros/bounding_boxes', BoundingBoxes, self.yolo_callback)
         
         self.reset_service = rospy.Service('reset_state_machine', Trigger, self.reset_callback)
-        self.start_service = rospy.Service('start_state_machine', Trigger, self.start_callback)
+        self.start_service = rospy.Service('start_state_machine', FindItem, self.start_callback)
 
     def init_locations(self):
         # 从bash.txt提取的6个导航点坐标
@@ -171,9 +182,16 @@ class RobotStateMachine(object):
         new_state_name = self.state_name(new_state)
         rospy.loginfo("状态转换: %s -> %s", old_state_name, new_state_name)
         
-        self.current_state = new_state
+        with self.state_lock:
+            self.current_state = new_state
+        
         self.publish_state()
         self.execute_state_actions()
+        
+        # 当任务完成时，准备响应并设置事件
+        if new_state == RobotState.COMPLETED:
+            self.prepare_service_response()
+            self.task_completion_event.set()
 
     def execute_state_actions(self):
         if self.current_state == RobotState.IDLE:
@@ -471,21 +489,38 @@ class RobotStateMachine(object):
         self.detected_objects_buffer = []
 
     def start_callback(self, req):
-        if self.current_state == RobotState.IDLE:
-            rospy.loginfo("通过服务调用启动，开始状态转换...")
-            # 设置默认任务
-            self.current_task_type = 'fruits'
-            rospy.loginfo("已设置默认任务: %s", self.current_task_type)
-            self.handle_event(Event.START_CMD)
-            return TriggerResponse(
-                success=True,
-                message=str("State machine started successfully")
-            )
-        else:
-            return TriggerResponse(
-                success=False,
-                message="State machine is not in IDLE state, cannot start"
-            )
+        with self.state_lock:
+            if self.current_state != RobotState.IDLE:
+                rospy.logwarn("状态机正忙，无法启动新任务。")
+                return FindItemResponse(room_location="ERROR_BUSY")
+
+        rospy.loginfo("通过服务调用启动，任务: 寻找 '%s'", req.item_to_find)
+
+        if req.item_to_find not in self.TASK_CATEGORIES:
+            rospy.logerr("未知任务类别: '%s'", req.item_to_find)
+            return FindItemResponse(room_location="ERROR_UNKNOWN_TASK")
+
+        # 重置并启动状态机
+        self.setup()
+        with self.state_lock:
+            self.current_task_type = req.item_to_find
+        
+        # 在新的线程中启动状态机事件，以防死锁
+        rospy.Timer(rospy.Duration(0.1), lambda e: self.handle_event(Event.START_CMD), oneshot=True)
+
+        # 等待任务完成事件，设置300秒（5分钟）超时
+        rospy.loginfo("任务已启动，等待完成...")
+        completed_in_time = self.task_completion_event.wait(timeout=300.0)
+
+        if not completed_in_time:
+            rospy.logerr("任务超时！重置状态机。")
+            self.stop_all_activities()
+            self.setup()
+            self.publish_state()
+            return FindItemResponse(room_location="ERROR_TIMEOUT")
+        
+        rospy.loginfo("任务完成，返回结果。")
+        return self.service_response
 
     def reset_callback(self, req):
         rospy.loginfo("收到重置服务请求，准备重置状态机...")
@@ -619,6 +654,25 @@ class RobotStateMachine(object):
         
         # 结束检测并处理结果
         self.finish_detection_phase(None)
+    
+    def prepare_service_response(self):
+        """准备服务响应，将中文房间名转换为英文标识符"""
+        if not self.found_objects_locations:
+            self.service_response = FindItemResponse(room_location="not_found")
+            return
+
+        # 假设找到的第一个物品就是代表
+        first_found_object = list(self.found_objects_locations.keys())[0]
+        room_name_chinese = self.found_objects_locations[first_found_object]
+
+        room_map = {
+            "A房间": "room_A",
+            "B房间": "room_B",
+            "C房间": "room_C"
+        }
+        room_name_english = room_map.get(room_name_chinese, "unknown_room")
+        
+        self.service_response = FindItemResponse(room_location=room_name_english)
     
     def report_task_results(self):
         """报告任务结果，显示所有找到的物品及其位置"""
