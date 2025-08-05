@@ -37,7 +37,7 @@ LOOK_RIGHT_DURATION = 1.0  # 向右看的时间（秒）
 
 # 定义置信度过滤阈值（可调节）
 PRIMARY_CONFIDENCE_THRESHOLD = 0.9  # 第一阶段（左右看）的置信度阈值
-SECONDARY_CONFIDENCE_THRESHOLD = 0.7  # 第二阶段（重试）的置信度阈值
+SECONDARY_CONFIDENCE_THRESHOLD = 0.5  # 第二阶段（重试）的置信度阈值
 RETRY_DETECTION_DURATION = 2.0  # 重试检测的持续时间（秒）
 PRELIMINARY_DETECTION_DURATION = 0.2  # 初步静态检测的持续时间（秒，可调节）
 
@@ -492,13 +492,13 @@ class RobotStateMachine(object):
         with self.state_lock:
             if self.current_state != RobotState.IDLE:
                 rospy.logwarn("状态机正忙，无法启动新任务。")
-                return FindItemResponse(room_location="ERROR_BUSY")
+                return FindItemResponse(room_location="ERROR_BUSY", found_item_name="")
 
         rospy.loginfo("通过服务调用启动，任务: 寻找 '%s'", req.item_to_find)
 
         if req.item_to_find not in self.TASK_CATEGORIES:
             rospy.logerr("未知任务类别: '%s'", req.item_to_find)
-            return FindItemResponse(room_location="ERROR_UNKNOWN_TASK")
+            return FindItemResponse(room_location="ERROR_UNKNOWN_TASK", found_item_name="")
 
         # 重置并启动状态机
         self.setup()
@@ -517,7 +517,7 @@ class RobotStateMachine(object):
             self.stop_all_activities()
             self.setup()
             self.publish_state()
-            return FindItemResponse(room_location="ERROR_TIMEOUT")
+            return FindItemResponse(room_location="ERROR_TIMEOUT", found_item_name="")
         
         rospy.loginfo("任务完成，返回结果。")
         return self.service_response
@@ -656,15 +656,17 @@ class RobotStateMachine(object):
         self.finish_detection_phase(None)
     
     def prepare_service_response(self):
-        """准备服务响应，将中文房间名转换为英文标识符"""
+        """准备服务响应，填充 room_location 和 found_item_name"""
         if not self.found_objects_locations:
-            self.service_response = FindItemResponse(room_location="not_found")
+            # 未找到任何物品
+            self.service_response = FindItemResponse(room_location="not_found", found_item_name="")
             return
 
-        # 假设找到的第一个物品就是代表
+        # 成功找到物品，提取第一个找到的物品名称和其所在的房间
         first_found_object = list(self.found_objects_locations.keys())[0]
         room_name_chinese = self.found_objects_locations[first_found_object]
 
+        # 将中文房间名转换为英文标识符
         room_map = {
             "A房间": "room_A",
             "B房间": "room_B",
@@ -672,7 +674,11 @@ class RobotStateMachine(object):
         }
         room_name_english = room_map.get(room_name_chinese, "unknown_room")
         
-        self.service_response = FindItemResponse(room_location=room_name_english)
+        # 构造包含两个字段的服务响应
+        self.service_response = FindItemResponse(
+            room_location=room_name_english,
+            found_item_name=first_found_object
+        )
     
     def report_task_results(self):
         """报告任务结果，显示所有找到的物品及其位置"""
