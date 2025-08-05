@@ -119,7 +119,7 @@ class RobotStateMachine(object):
             'vegetables': ['pepper', 'potato', 'tomato']
         }
         self.current_task = 'fruits'  # 默认任务
-        self.yolo_confidence_threshold = 0.5 # YOLO识别的置信度阈值
+        self.yolo_confidence_threshold = 0.6 # YOLO识别的置信度阈值
         self.found_good_name = None   # 用于存储找到的货物名称
         
         # 图像和过滤器参数
@@ -880,17 +880,8 @@ class RobotStateMachine(object):
                 rospy.logerr("仿真任务执行失败。")
                 self.handle_event(Event.NAV_DONE_FAILURE) # 复用导航失败事件
         elif self.current_state == RobotState.SPEAK_ROOM:
-            rospy.loginfo("状态[SPEAK_ROOM]: 准备播报仿真任务找到的房间...")
-            if self.simulation_room_location and self.simulation_room_location != 'unknown_room':
-                # 如果成功找到了房间，就播报房间名
-                self.current_voice_cmd = self.simulation_room_location
-                self.voice_service_called = False  # 重置标记
-                self.call_voice_service()
-            else:
-                # 如果没有找到房间，则直接跳过播报
-                rospy.logwarn("未记录有效的仿真房间位置，跳过播报。")
-                # 使用Timer确保状态转换在当前回调之外执行
-                rospy.Timer(rospy.Duration(0.1), lambda e: self.handle_event(Event.SPEAK_DONE), oneshot=True)
+            rospy.loginfo("进入房间播报状态，开始模拟播报，持续3秒...")
+            rospy.Timer(rospy.Duration(3.0), self._speak_room_timer_callback, oneshot=True)
         elif self.current_state == RobotState.NAV_TO_TRAFFIC:
             rospy.loginfo("进入红绿灯区域状态，准备导航至第一车道观察点...")
             rospy.Timer(rospy.Duration(0.5), self._traffic_timer_callback, oneshot=True)
