@@ -131,8 +131,8 @@ class RobotStateMachine(object):
         # 初始化YOLO检测订阅者
         self.yolo_subscriber = rospy.Subscriber('/darknet_ros/bounding_boxes', BoundingBoxes, self.yolo_callback)
         
-        self.reset_service = rospy.Service('reset_state_machine', Trigger, self.reset_callback)
-        self.start_service = rospy.Service('start_state_machine', FindItem, self.start_callback)
+        self.reset_service = rospy.Service('/reset_state_machine', Trigger, self.reset_callback)
+        self.start_service = rospy.Service('/start_state_machine', FindItem, self.start_callback)
 
     def init_locations(self):
         # 从bash.txt提取的6个导航点坐标
