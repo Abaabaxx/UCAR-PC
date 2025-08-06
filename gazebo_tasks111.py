@@ -36,7 +36,9 @@ LOOK_LEFT_DURATION = 0.5  # 向左看的时间（秒）
 LOOK_RIGHT_DURATION = 1.0  # 向右看的时间（秒）
 
 # 定义置信度过滤阈值（可调节）
-PRIMARY_CONFIDENCE_THRESHOLD = 0.95  # 唯一的置信度阈值
+PRIMARY_CONFIDENCE_THRESHOLD = 0.9  # 第一阶段（左右看）的置信度阈值
+SECONDARY_CONFIDENCE_THRESHOLD = 0.5  # 第二阶段（重试）的置信度阈值
+RETRY_DETECTION_DURATION = 2.0  # 重试检测的持续时间（秒）
 PRELIMINARY_DETECTION_DURATION = 0.2  # 初步静态检测的持续时间（秒，可调节）
 
 class RobotState(object):
@@ -111,6 +113,7 @@ class RobotStateMachine(object):
             self.detected_objects_buffer = []
             self.current_task_type = None
             self.found_objects_locations = {}
+            self.is_retry_attempt = False  # 标记是否为重试检测
             self.best_detection = None  # 存储最佳检测结果
             if self.detection_timer:
                 self.detection_timer.shutdown()
@@ -131,8 +134,8 @@ class RobotStateMachine(object):
         # 初始化YOLO检测订阅者
         self.yolo_subscriber = rospy.Subscriber('/darknet_ros/bounding_boxes', BoundingBoxes, self.yolo_callback)
         
-        self.reset_service = rospy.Service('/reset_state_machine', Trigger, self.reset_callback)
-        self.start_service = rospy.Service('/start_state_machine', FindItem, self.start_callback)
+        self.reset_service = rospy.Service('reset_state_machine', Trigger, self.reset_callback)
+        self.start_service = rospy.Service('start_state_machine', FindItem, self.start_callback)
 
     def init_locations(self):
         # 从bash.txt提取的6个导航点坐标
@@ -229,19 +232,23 @@ class RobotStateMachine(object):
         # 处理新的检测状态
         elif self.current_state == RobotState.DETECT_AT_C1:
             rospy.loginfo("9-开始在C1点检测物体...")
-            self.start_static_detection()
+            self.is_retry_attempt = False  # 重置重试标记
+            self.start_preliminary_detection()
             
         elif self.current_state == RobotState.DETECT_AT_C2:
             rospy.loginfo("10-开始在C2点检测物体...")
-            self.start_static_detection()
+            self.is_retry_attempt = False  # 重置重试标记
+            self.start_preliminary_detection()
             
         elif self.current_state == RobotState.DETECT_AT_B1:
             rospy.loginfo("11-开始在B1点检测物体...")
-            self.start_static_detection()
+            self.is_retry_attempt = False  # 重置重试标记
+            self.start_preliminary_detection()
             
         elif self.current_state == RobotState.DETECT_AT_A1:
             rospy.loginfo("12-开始在A1点检测物体...")
-            self.start_static_detection()
+            self.is_retry_attempt = False  # 重置重试标记
+            self.start_preliminary_detection()
 
     def handle_event(self, event):
         event_name = self.event_name(event)
@@ -334,19 +341,20 @@ class RobotStateMachine(object):
 
     def yolo_callback(self, msg):
         """接收YOLO检测的结果，根据置信度过滤并追踪最佳检测结果"""
+        # 检查是否设置了当前任务类型
         if self.current_task_type is None:
             return
-        
+            
+        # 获取当前任务对应的有效物品列表
         valid_objects = self.TASK_CATEGORIES.get(self.current_task_type, [])
         
-        # 遍历所有检测框，寻找符合阈值且置信度最高的任务物品
+        # 确定当前应使用的置信度阈值
+        current_threshold = SECONDARY_CONFIDENCE_THRESHOLD if self.is_retry_attempt else PRIMARY_CONFIDENCE_THRESHOLD
+        
+        # 遍历所有检测框，寻找符合阈值且置信度最高的
         for box in msg.bounding_boxes:
-            # 检查物品是否属于当前任务类别
-            if box.Class not in valid_objects:
-                continue  # 如果不是任务物品，则跳过
-
-            # 如果物品置信度高于阈值
-            if box.probability > PRIMARY_CONFIDENCE_THRESHOLD:
+            # 如果物品类别匹配当前任务且置信度高于阈值
+            if box.Class in valid_objects and box.probability > current_threshold:
                 # 如果还没有最佳检测，或者当前框的置信度更高
                 if self.best_detection is None or box.probability > self.best_detection.probability:
                     self.best_detection = box
@@ -357,7 +365,7 @@ class RobotStateMachine(object):
         if self.detected_objects_buffer:
             rospy.logdebug("收到检测对象: %d 个", len(self.detected_objects_buffer))
 
-    def start_static_detection(self):
+    def start_preliminary_detection(self):
         """开始初步静态检测，清空缓冲区并设置短暂的定时器"""
         self.detected_objects_buffer = []
         self.best_detection = None  # 重置最佳检测结果
@@ -366,26 +374,56 @@ class RobotStateMachine(object):
         if self.detection_timer:
             self.detection_timer.shutdown()
         
-        rospy.loginfo("开始静态检测 - 观察%.2f秒...", PRELIMINARY_DETECTION_DURATION)
+        rospy.loginfo("初步静态检测 - 观察%.2f秒 (置信度阈值: %.2f)", PRELIMINARY_DETECTION_DURATION, PRIMARY_CONFIDENCE_THRESHOLD)
         
         # 创建定时器，PRELIMINARY_DETECTION_DURATION秒后评估初步检测结果
         self.detection_timer = rospy.Timer(
             rospy.Duration(PRELIMINARY_DETECTION_DURATION),
-            self.evaluate_static_detection,
+            self.evaluate_preliminary_detection,
             oneshot=True
         )
         
-    def evaluate_static_detection(self, timer_event=None):
-        """评估静态检测结果，如果失败则开始旋转检测"""
-        if self.best_detection is not None:
-            rospy.loginfo("静态检测发现高置信度物体，分析结果...")
-            self.finish_detection_phase()
+    def evaluate_preliminary_detection(self, timer_event=None):
+        """评估初步静态检测结果，决定是否需要进行左右看"""
+        # 检查是否有任何物体的置信度超过阈值（不限于任务物品）
+        any_high_confidence_detection = False
+        
+        for box in self.detected_objects_buffer:
+            if box.probability > PRIMARY_CONFIDENCE_THRESHOLD:
+                any_high_confidence_detection = True
+                break
+                
+        if any_high_confidence_detection:
+            # 如果有高置信度物体，直接结束检测并分析结果
+            rospy.loginfo("初步检测发现高置信度物体，直接分析结果...")
+            self.finish_detection_phase(None)
         else:
-            rospy.loginfo("静态检测未发现高置信度物体，开始左右看检测...")
+            # 如果没有高置信度物体，启动左右看检测
+            rospy.loginfo("初步检测未发现高置信度物体，开始左右看检测...")
+            self.start_detection_phase()
+            
+    def start_detection_phase(self):
+        """开始检测阶段，根据是否为重试决定检测方式"""
+        # 如果存在旧的定时器，关闭它
+        if self.detection_timer:
+            self.detection_timer.shutdown()
+        
+        if not self.is_retry_attempt:
+            # 第一阶段：左右看检测（高置信度）
+            rospy.loginfo("第一阶段检测 - 左右看 (置信度阈值: %.2f)", PRIMARY_CONFIDENCE_THRESHOLD)
             self.perform_look_around()
+        else:
+            # 第二阶段：静态重试检测（低置信度）
+            rospy.loginfo("第二阶段检测 - 静态重试 (置信度阈值: %.2f)", SECONDARY_CONFIDENCE_THRESHOLD)
+            # 创建定时器，RETRY_DETECTION_DURATION秒后结束检测
+            self.detection_timer = rospy.Timer(
+                rospy.Duration(RETRY_DETECTION_DURATION),
+                self.finish_detection_phase,
+                oneshot=True
+            )
 
     def finish_detection_phase(self, timer_event=None):
-        """检测阶段结束，处理检测结果并触发相应事件"""
+        """检测阶段结束，处理检测结果并触发相应事件或进入重试阶段"""
         # 确定房间名称
         if self.current_state == RobotState.DETECT_AT_C1 or self.current_state == RobotState.DETECT_AT_C2:
             room_name = "C房间"
@@ -396,17 +434,56 @@ class RobotStateMachine(object):
         else:
             room_name = "未知房间"
         
-        # 检查是否找到了高置信度的最佳检测结果
+        # 检查是否找到了符合任务和置信度要求的最佳检测结果
         if self.best_detection is not None:
-            # 成功找到物品
+            # 成功找到任务物品
             self.found_objects_locations[self.best_detection.Class] = room_name
-            rospy.logwarn("在%s检测到物品: %s (置信度: %.2f)", 
+            rospy.logwarn("在%s检测到任务物品: %s (置信度: %.2f)", 
                         room_name, self.best_detection.Class, self.best_detection.probability)
             self.handle_event(Event.DETECT_DONE_FOUND)
         else:
-            # 未找到任何高置信度的物品
-            rospy.logwarn("在%s未找到任何高置信度物品。", room_name)
-            self.handle_event(Event.DETECT_DONE_NOT_FOUND)
+            # 未找到任务物品，进行详细日志输出
+            rospy.logwarn("在%s未找到符合任务 '%s' 的物品。", room_name, self.current_task_type)
+            
+            # 日志记录和决策逻辑
+            anything_else_seen = False
+            low_confidence_items = {}
+            valid_objects = self.TASK_CATEGORIES.get(self.current_task_type, [])
+            already_warned = set()
+
+            for box in self.detected_objects_buffer:
+                # 检查是否有任务外的、但置信度足够高的物品
+                if box.probability > PRIMARY_CONFIDENCE_THRESHOLD:
+                    if box.Class not in valid_objects and box.Class not in already_warned:
+                        rospy.logwarn("  - (警告) 检测到任务外高置信度物品: %s (置信度: %.2f)", box.Class, box.probability)
+                        anything_else_seen = True
+                        already_warned.add(box.Class)
+                
+                # 记录所有低置信度的物品
+                if box.probability <= PRIMARY_CONFIDENCE_THRESHOLD:
+                    if box.Class not in low_confidence_items or box.probability > low_confidence_items[box.Class]:
+                        low_confidence_items[box.Class] = box.probability
+
+            if low_confidence_items:
+                low_conf_str = ", ".join(["%s (%.2f)" % (k, v) for k, v in low_confidence_items.items()])
+                rospy.loginfo("  - (备注) 检测到低置信度物品 (已忽略): %s", low_conf_str)
+
+            # --- 新的决策逻辑 ---
+            if not self.is_retry_attempt:
+                # 这是第一轮检测（包括初步静态检测和左右看）
+                if anything_else_seen:
+                    # 分支1: 找到了任务外的高置信度物品，搜索结束
+                    rospy.loginfo("  -> 发现高置信度物品，该点搜索完成，不再重试。")
+                    self.handle_event(Event.DETECT_DONE_NOT_FOUND)
+                else:
+                    # 分支2: 什么高置信度的都没看到，进入重试
+                    rospy.loginfo("  -> 未发现任何高置信度物品，进入第二阶段重试...")
+                    self.is_retry_attempt = True
+                    self.start_detection_phase()
+            else:
+                # 分支3: 这已经是重试阶段，仍然没找到任务物品
+                rospy.loginfo("  -> 重试失败，放弃该点检测。")
+                self.handle_event(Event.DETECT_DONE_NOT_FOUND)
         
         # 清空检测缓冲区
         self.detected_objects_buffer = []
@@ -579,37 +656,30 @@ class RobotStateMachine(object):
         self.finish_detection_phase(None)
     
     def prepare_service_response(self):
-        """准备服务响应，筛选并填充第一个找到的任务物品及其房间"""
-        # 获取当前任务的有效物品列表
-        valid_objects = self.TASK_CATEGORIES.get(self.current_task_type, [])
-        found_item = None
-        found_room = None
-
-        # 遍历所有找到的物品，查找第一个符合任务类别的
-        for item, room_chinese in self.found_objects_locations.items():
-            if item in valid_objects:
-                found_item = item
-                found_room_chinese = room_chinese
-                break # 找到第一个就停止
-
-        if found_item:
-            # 将中文房间名转换为英文标识符
-            room_map = {
-                "A房间": "room_A",
-                "B房间": "room_B",
-                "C房间": "room_C"
-            }
-            room_name_english = room_map.get(found_room_chinese, "unknown_room")
-            
-            # 构造包含两个字段的服务响应
-            self.service_response = FindItemResponse(
-                room_location=room_name_english,
-                found_item_name=found_item
-            )
-        else:
-            # 未找到任何与任务相关的物品
+        """准备服务响应，填充 room_location 和 found_item_name"""
+        if not self.found_objects_locations:
+            # 未找到任何物品
             self.service_response = FindItemResponse(room_location="not_found", found_item_name="")
+            return
 
+        # 成功找到物品，提取第一个找到的物品名称和其所在的房间
+        first_found_object = list(self.found_objects_locations.keys())[0]
+        room_name_chinese = self.found_objects_locations[first_found_object]
+
+        # 将中文房间名转换为英文标识符
+        room_map = {
+            "A房间": "room_A",
+            "B房间": "room_B",
+            "C房间": "room_C"
+        }
+        room_name_english = room_map.get(room_name_chinese, "unknown_room")
+        
+        # 构造包含两个字段的服务响应
+        self.service_response = FindItemResponse(
+            room_location=room_name_english,
+            found_item_name=first_found_object
+        )
+    
     def report_task_results(self):
         """报告任务结果，显示所有找到的物品及其位置"""
         if not self.found_objects_locations:
