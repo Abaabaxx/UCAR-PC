@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+# 该版本对 如果机器人在C1点看到了高置信度的“牛奶”，即使它要找的是“水果”，它也会直接前往B1点
+
 import rospy
 import actionlib
 import threading
@@ -36,7 +38,7 @@ LOOK_LEFT_DURATION = 0.5  # 向左看的时间（秒）
 LOOK_RIGHT_DURATION = 1.0  # 向右看的时间（秒）
 
 # 定义置信度过滤阈值（可调节）
-PRIMARY_CONFIDENCE_THRESHOLD = 0.9  # 唯一的置信度阈值
+PRIMARY_CONFIDENCE_THRESHOLD = 0.90  # 唯一的置信度阈值
 PRELIMINARY_DETECTION_DURATION = 0.2  # 初步静态检测的持续时间（秒，可调节）
 
 class RobotState(object):
@@ -333,25 +335,15 @@ class RobotStateMachine(object):
                 self.transition(RobotState.NAV_TO_MIDPOINT)
 
     def yolo_callback(self, msg):
-        """接收YOLO检测的结果，根据任务类别和置信度过滤，并追踪最佳检测结果"""
-        # 如果任务未开始或任务类型未知，则不进行处理
-        if not self.current_task_type:
-            return
-        
-        # 获取当前任务需要寻找的物品列表
-        target_items = self.TASK_CATEGORIES.get(self.current_task_type, [])
-        if not target_items:
-            rospy.logwarn_once("当前任务类别 '%s' 没有定义可寻找的物品列表。", self.current_task_type)
-            return
-            
-        # 遍历所有检测框，寻找符合任务要求且置信度最高的物体
+        """接收YOLO检测的结果，根据置信度过滤并追踪最佳检测结果"""
+        # 遍历所有检测框，寻找符合阈值且置信度最高的
         for box in msg.bounding_boxes:
-            # 检查物品类别是否匹配任务，并且置信度高于阈值
-            if box.Class in target_items and box.probability > PRIMARY_CONFIDENCE_THRESHOLD:
+            # 如果物品置信度高于阈值
+            if box.probability > PRIMARY_CONFIDENCE_THRESHOLD:
                 # 如果还没有最佳检测，或者当前框的置信度更高
                 if self.best_detection is None or box.probability > self.best_detection.probability:
                     self.best_detection = box
-                    rospy.logdebug("更新任务相关最佳检测: %s (置信度: %.2f)", box.Class, box.probability)
+                    rospy.logdebug("更新最佳检测: %s (置信度: %.2f)", box.Class, box.probability)
         
         # 保存所有原始检测结果（用于调试）
         self.detected_objects_buffer = msg.bounding_boxes
@@ -580,29 +572,43 @@ class RobotStateMachine(object):
         self.finish_detection_phase(None)
     
     def prepare_service_response(self):
-        """准备服务响应，填充 room_location 和 found_item_name"""
-        if not self.found_objects_locations:
-            # 未找到任何物品
+        """
+        准备服务响应。
+        遍历所有找到的物品，根据当前任务类型筛选，并返回第一个匹配的物品。
+        """
+        target_items = self.TASK_CATEGORIES.get(self.current_task_type, [])
+        found_task_item = None
+        found_item_location_chinese = None
+
+        rospy.loginfo("任务完成，开始根据任务 '%s' 筛选结果...", self.current_task_type)
+        rospy.loginfo("盘点清单: %s", str(self.found_objects_locations))
+
+        # 遍历盘点清单，寻找符合任务要求的物品
+        for item, location in self.found_objects_locations.items():
+            if item in target_items:
+                found_task_item = item
+                found_item_location_chinese = location
+                rospy.loginfo("在盘点清单中找到匹配物品: %s，位于 %s", item, location)
+                break  # 找到第一个匹配项就停止
+
+        if found_task_item:
+            # 如果找到了匹配的物品
+            room_map = {
+                "A房间": "room_A",
+                "B房间": "room_B",
+                "C房间": "room_C"
+            }
+            room_name_english = room_map.get(found_item_location_chinese, "unknown_room")
+            
+            self.service_response = FindItemResponse(
+                room_location=room_name_english,
+                found_item_name=found_task_item
+            )
+            rospy.loginfo("服务响应已准备: 物品 %s, 房间 %s", found_task_item, room_name_english)
+        else:
+            # 如果盘点清单中没有任何物品符合任务要求
             self.service_response = FindItemResponse(room_location="not_found", found_item_name="")
-            return
-
-        # 成功找到物品，提取第一个找到的物品名称和其所在的房间
-        first_found_object = list(self.found_objects_locations.keys())[0]
-        room_name_chinese = self.found_objects_locations[first_found_object]
-
-        # 将中文房间名转换为英文标识符
-        room_map = {
-            "A房间": "room_A",
-            "B房间": "room_B",
-            "C房间": "room_C"
-        }
-        room_name_english = room_map.get(room_name_chinese, "unknown_room")
-        
-        # 构造包含两个字段的服务响应
-        self.service_response = FindItemResponse(
-            room_location=room_name_english,
-            found_item_name=first_found_object
-        )
+            rospy.logwarn("任务 '%s' 未在任何房间找到匹配的物品", self.current_task_type)
     
     def report_task_results(self):
         """报告任务结果，显示所有找到的物品及其位置"""
