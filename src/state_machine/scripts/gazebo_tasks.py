@@ -36,7 +36,7 @@ LOOK_LEFT_DURATION = 0.5  # 向左看的时间（秒）
 LOOK_RIGHT_DURATION = 1.0  # 向右看的时间（秒）
 
 # 定义置信度过滤阈值（可调节）
-PRIMARY_CONFIDENCE_THRESHOLD = 0.9  # 唯一的置信度阈值
+PRIMARY_CONFIDENCE_THRESHOLD = 0.95  # 唯一的置信度阈值
 PRELIMINARY_DETECTION_DURATION = 0.2  # 初步静态检测的持续时间（秒，可调节）
 
 class RobotState(object):

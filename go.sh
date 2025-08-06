@@ -1,4 +1,4 @@
-#!/bin-bash
+#!/bin/bash
 
 # 为每一个 roslaunch 命令打开一个新的终端窗口
 
@@ -7,13 +7,6 @@
 # "..." 中的 roslaunch ...; exec bash 的作用是：先执行roslaunch，当roslaunch结束后(比如你按Ctrl+C)，
 # 终端不会马上关闭，而是会给你一个可交互的bash shell，方便你查看错误信息。
 
-echo "在新终端中启动 a.launch..."
-gnome-terminal -- bash -c "roslaunch package_a a.launch; exec bash"
+echo "在终端中启动仿真部分的launch文件..."
 
-# 等待几秒钟，确保 roscore 已经启动
-sleep 5
-
-echo "在新终端中启动 b.launch..."
-gnome-terminal -- bash -c "roslaunch package_b b.launch; exec bash"
-
-echo "所有 launch 文件已在新的终端窗口中启动。"
+roslaunch /home/lby/ucar_ws/src/state_machine/launch/simulation_all.launch
